@@ -146,10 +146,13 @@ func (m *SSEManager) Run(ctx context.Context) {
 			m.mutex.Unlock()
 
 		case <-ticker.C:
-			// Send heartbeat to all clients
+			// Send heartbeat to all clients in JSON-RPC format
 			heartbeat := map[string]interface{}{
-				"type":      "heartbeat",
-				"timestamp": time.Now().Format(time.RFC3339),
+				"jsonrpc":   "2.0",
+				"method":    "heartbeat",
+				"params": map[string]interface{}{
+					"timestamp": time.Now().Format(time.RFC3339),
+				},
 			}
 			heartbeatJSON, _ := json.Marshal(heartbeat)
 			m.mutex.Lock()
@@ -246,8 +249,17 @@ func (s *ExcelServer) serveSSE() error {
 		// Register the client
 		manager.register <- client
 
-		// Send an immediate connection message
-		fmt.Fprintf(w, "data: {\"type\":\"connection\",\"message\":\"Connected to Excel MCP Server\",\"id\":\"%s\"}\n\n", clientID)
+		// Send an immediate connection message in JSON-RPC format
+		jsonrpcMsg := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method": "connection",
+			"params": map[string]interface{}{
+				"message": "Connected to Excel MCP Server",
+				"id": clientID,
+			},
+		}
+		jsonrpcData, _ := json.Marshal(jsonrpcMsg)
+		fmt.Fprintf(w, "data: %s\n\n", jsonrpcData)
 		flusher.Flush()
 
 		// Ensure client is unregistered when the connection is closed
@@ -279,8 +291,16 @@ func (s *ExcelServer) serveSSE() error {
 				fmt.Fprintf(w, "data: %s\n\n", message)
 				flusher.Flush()
 			case <-ticker.C:
-				// Send a heartbeat directly from this handler
-				fmt.Fprintf(w, "data: {\"type\":\"heartbeat\",\"timestamp\":\"%s\"}\n\n", time.Now().Format(time.RFC3339))
+				// Send a heartbeat directly from this handler in JSON-RPC format
+				heartbeatMsg := map[string]interface{}{
+					"jsonrpc": "2.0",
+					"method": "heartbeat",
+					"params": map[string]interface{}{
+						"timestamp": time.Now().Format(time.RFC3339),
+					},
+				}
+				heartbeatData, _ := json.Marshal(heartbeatMsg)
+				fmt.Fprintf(w, "data: %s\n\n", heartbeatData)
 				flusher.Flush()
 			case <-done:
 				// Client disconnected
@@ -325,11 +345,14 @@ func (s *ExcelServer) serveSSE() error {
 		w.WriteHeader(http.StatusOK)
 		w.Write(responseJSON)
 		
-		// Broadcast a notification about the command to all SSE clients
+		// Broadcast a notification about the command to all SSE clients in JSON-RPC format
 		notification := map[string]interface{}{
-			"type":    "command",
-			"message": "Command received",
-			"time":    time.Now().Format(time.RFC3339),
+			"jsonrpc": "2.0",
+			"method":  "command",
+			"params": map[string]interface{}{
+				"message": "Command received",
+				"time":    time.Now().Format(time.RFC3339),
+			},
 		}
 		notificationJSON, _ := json.Marshal(notification)
 		manager.broadcast <- notificationJSON
