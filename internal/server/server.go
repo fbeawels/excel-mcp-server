@@ -269,11 +269,32 @@ func (s *ExcelServer) serveSSE() error {
 			},
 		}
 		jsonrpcData, _ := json.Marshal(jsonrpcMsg)
+		
+		// Log the exact message being sent
+		log.Printf("Sending connection message to client %s: %s", clientID, string(jsonrpcData))
+		
+		// Ensure proper SSE format with data: prefix and double newline suffix
 		fmt.Fprintf(w, "data: %s\n\n", jsonrpcData)
+		flusher.Flush()
+		
+		// Send an immediate heartbeat to ensure the connection is working
+		heartbeatMsg := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method": "heartbeat",
+			"params": map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+			},
+		}
+		heartbeatData, _ := json.Marshal(heartbeatMsg)
+		log.Printf("Sending immediate heartbeat to client %s", clientID)
+		fmt.Fprintf(w, "data: %s\n\n", heartbeatData)
 		flusher.Flush()
 		
 		// Log connection success but don't send tools list automatically
 		log.Printf("Client %s connected successfully. Tools will be sent upon initialize request.", clientID)
+		
+		// Log CORS headers for debugging
+		log.Printf("Response headers for client %s: %v", clientID, w.Header())
 
 		// Ensure client is unregistered when the connection is closed
 		defer func() {
@@ -389,6 +410,9 @@ func (s *ExcelServer) serveSSE() error {
 
 		case "initialize":
 			// Implement handle_initialize as required by MCP specification
+			// Log the raw params for debugging
+			log.Printf("Received initialize request with params: %s", string(jsonrpcRequest.Params))
+			
 			// Parse initialize parameters
 			var initParams struct {
 				ClientInfo struct {
@@ -398,9 +422,10 @@ func (s *ExcelServer) serveSSE() error {
 			}
 			
 			if err := json.Unmarshal(jsonrpcRequest.Params, &initParams); err != nil {
+				log.Printf("Error parsing initialize params: %v", err)
 				errorObj = &map[string]interface{}{
 					"code": -32602,
-					"message": "Invalid params for initialize",
+					"message": "Invalid params for initialize: " + err.Error(),
 				}
 			} else {
 				log.Printf("Initialized client: %s v%s", initParams.ClientInfo.Name, initParams.ClientInfo.Version)
@@ -463,6 +488,7 @@ func (s *ExcelServer) serveSSE() error {
 					},
 				}
 				
+				// Prepare the response object
 				responseObj = map[string]interface{}{
 					"serverInfo": map[string]interface{}{
 						"name": "excel-mcp-server",
@@ -471,6 +497,10 @@ func (s *ExcelServer) serveSSE() error {
 					},
 					"tools": tools,
 				}
+				
+				// Log the response for debugging
+				responseJSON, _ := json.Marshal(responseObj)
+				log.Printf("Sending initialize response: %s", string(responseJSON))
 			}
 
 		case "list_tools":
