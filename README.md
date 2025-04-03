@@ -2,8 +2,8 @@
 
 <img src="docs/img/icon-800.png" width="128">
 
-[![NPM Version](https://img.shields.io/npm/v/@negokaz/excel-mcp-server)](https://www.npmjs.com/package/@negokaz/excel-mcp-server)
-[![smithery badge](https://smithery.ai/badge/@negokaz/excel-mcp-server)](https://smithery.ai/server/@negokaz/excel-mcp-server)
+[![NPM Version](https://img.shields.io/npm/v/@fbeawels/excel-mcp-server)](https://www.npmjs.com/package/@fbeawels/excel-mcp-server)
+[![smithery badge](https://smithery.ai/badge/@fbeawels/excel-mcp-server)](https://smithery.ai/server/@fbeawels/excel-mcp-server)
 
 A Model Context Protocol (MCP) server that reads and writes MS Excel data.
 
@@ -34,13 +34,15 @@ For more details, see the [tools](#tools) section.
 
 excel-mcp-server is automatically installed by adding the following configuration to the MCP servers configuration.
 
+#### Using stdio transport (default)
+
 For Windows:
 ```json
 {
     "mcpServers": {
         "excel": {
             "command": "cmd",
-            "args": ["/c", "npx", "--yes", "@negokaz/excel-mcp-server"],
+            "args": ["/c", "npx", "--yes", "@fbeawels/excel-mcp-server"],
             "env": {
                 "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"
             }
@@ -55,7 +57,7 @@ For other platforms:
     "mcpServers": {
         "excel": {
             "command": "npx",
-            "args": ["--yes", "@negokaz/excel-mcp-server"],
+            "args": ["--yes", "@fbeawels/excel-mcp-server"],
             "env": {
                 "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"
             }
@@ -64,12 +66,55 @@ For other platforms:
 }
 ```
 
+#### Using SSE transport
+
+For Windows:
+```json
+{
+    "mcpServers": {
+        "excel": {
+            "command": "cmd",
+            "args": ["/c", "npx", "--yes", "@fbeawels/excel-mcp-server"],
+            "env": {
+                "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000",
+                "EXCEL_MCP_TRANSPORT": "sse",
+                "EXCEL_MCP_HOST": "0.0.0.0",
+                "EXCEL_MCP_PORT": "8000"
+            }
+        }
+    }
+}
+```
+
+For other platforms:
+```json
+{
+    "mcpServers": {
+        "excel": {
+            "command": "npx",
+            "args": ["--yes", "@fbeawels/excel-mcp-server"],
+            "env": {
+                "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000",
+                "EXCEL_MCP_TRANSPORT": "sse",
+                "EXCEL_MCP_HOST": "0.0.0.0",
+                "EXCEL_MCP_PORT": "8000"
+            }
+        }
+    }
+}
+```
+
+When using SSE transport, the server will start an HTTP server with the following endpoints:
+- `/sse` - SSE endpoint for receiving events from the server
+- `/command` - POST endpoint for sending commands to the server
+- `/status` - GET endpoint for checking server status
+
 ### Installing via Smithery
 
-To install Excel MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@negokaz/excel-mcp-server):
+To install Excel MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@fbeawels/excel-mcp-server):
 
 ```bash
-npx -y @smithery/cli install @negokaz/excel-mcp-server --client claude
+npx -y @smithery/cli install @fbeawels/excel-mcp-server --client claude
 ```
 
 <h2 id="tools">Tools</h2>
@@ -154,15 +199,48 @@ Write formulas to the Excel sheet.
 
 <h2 id="tools">Configuration</h2>
 
-You can change the MCP Server behaviors by the following environment variables:
+### Command-line Arguments
+
+The following command-line arguments are available:
+
+```
+--transport <type>   Transport type (stdio or sse)
+--host <address>     Host address to listen on for SSE transport (default: all interfaces)
+--port <number>      Port for SSE transport (default: 8000)
+```
+
+Example usage:
+```bash
+npx @fbeawels/excel-mcp-server --transport sse --host 0.0.0.0 --port 8000
+```
+
+### Environment Variables
+
+You can also change the MCP Server behaviors by the following environment variables:
 
 ### `EXCEL_MCP_PAGING_CELLS_LIMIT`
 
 The maximum number of cells to read in a single paging operation.  
 [default: 4000]
 
+### `EXCEL_MCP_TRANSPORT`
+
+The transport mechanism to use for communication.  
+Possible values: `stdio`, `sse`  
+[default: stdio]
+
+### `EXCEL_MCP_HOST`
+
+The host address to bind to when using SSE transport.  
+[default: ""] (all interfaces)
+
+### `EXCEL_MCP_PORT`
+
+The port to use for the HTTP server when using SSE transport.  
+[default: 8000]
+
 ## License
 
-Copyright (c) 2025 Kazuki Negoro
+Copyright (c) 2025 Franck Besnard
 
 excel-mcp-server is released under the [MIT License](LICENSE)

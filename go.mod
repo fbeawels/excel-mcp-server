@@ -1,8 +1,6 @@
-module github.com/negokaz/excel-mcp-server
+module github.com/fbeawels/excel-mcp-server
 
 go 1.23
-
-toolchain go1.24.0
 
 require (
 	github.com/Oudwins/zog v0.17.0

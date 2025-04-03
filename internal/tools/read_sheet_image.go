@@ -13,7 +13,7 @@ import (
 	"github.com/devlights/goxcel/constants"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	imcp "github.com/negokaz/excel-mcp-server/internal/mcp"
+	imcp "github.com/fbeawels/excel-mcp-server/internal/mcp"
 )
 
 type ReadSheetImageArguments struct {
