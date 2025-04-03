@@ -1,12 +1,16 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -79,16 +83,120 @@ func (s *ExcelServer) Start() error {
 	}
 }
 
+// SSEClient represents a connected SSE client
+type SSEClient struct {
+	ID       string
+	Messages chan []byte
+}
+
+// SSEManager manages all SSE client connections
+type SSEManager struct {
+	clients    map[string]*SSEClient
+	register   chan *SSEClient
+	unregister chan *SSEClient
+	broadcast  chan []byte
+	mutex      sync.Mutex
+}
+
+// NewSSEManager creates a new SSE manager
+func NewSSEManager() *SSEManager {
+	return &SSEManager{
+		clients:    make(map[string]*SSEClient),
+		register:   make(chan *SSEClient),
+		unregister: make(chan *SSEClient),
+		broadcast:  make(chan []byte),
+	}
+}
+
+// Run starts the SSE manager
+func (m *SSEManager) Run(ctx context.Context) {
+	// Start a heartbeat ticker
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case client := <-m.register:
+			m.mutex.Lock()
+			m.clients[client.ID] = client
+			log.Printf("Client connected: %s (total: %d)", client.ID, len(m.clients))
+			m.mutex.Unlock()
+
+		case client := <-m.unregister:
+			m.mutex.Lock()
+			if _, ok := m.clients[client.ID]; ok {
+				delete(m.clients, client.ID)
+				close(client.Messages)
+				log.Printf("Client disconnected: %s (remaining: %d)", client.ID, len(m.clients))
+			}
+			m.mutex.Unlock()
+
+		case message := <-m.broadcast:
+			m.mutex.Lock()
+			for _, client := range m.clients {
+				select {
+				case client.Messages <- message:
+					// Message sent successfully
+				default:
+					// Client's message buffer is full, unregister it
+					close(client.Messages)
+					delete(m.clients, client.ID)
+				}
+			}
+			m.mutex.Unlock()
+
+		case <-ticker.C:
+			// Send heartbeat to all clients
+			heartbeat := map[string]interface{}{
+				"type":      "heartbeat",
+				"timestamp": time.Now().Format(time.RFC3339),
+			}
+			heartbeatJSON, _ := json.Marshal(heartbeat)
+			m.mutex.Lock()
+			for _, client := range m.clients {
+				select {
+				case client.Messages <- heartbeatJSON:
+					// Heartbeat sent successfully
+				default:
+					// Client's message buffer is full, unregister it
+					close(client.Messages)
+					delete(m.clients, client.ID)
+				}
+			}
+			m.mutex.Unlock()
+
+		case <-ctx.Done():
+			// Context canceled, close all client connections
+			m.mutex.Lock()
+			for _, client := range m.clients {
+				close(client.Messages)
+			}
+			m.clients = make(map[string]*SSEClient)
+			m.mutex.Unlock()
+			return
+		}
+	}
+}
+
 // serveSSE starts an HTTP server that serves the MCP server over SSE
 func (s *ExcelServer) serveSSE() error {
+	// Create a new SSE manager
+	manager := NewSSEManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start the SSE manager
+	go manager.Run(ctx)
+
 	// Add a middleware to handle CORS
 	corsMiddleware := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			// Set CORS headers for all responses
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With")
 			w.Header().Set("Access-Control-Max-Age", "3600")
+			w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
 
 			// Handle preflight requests
 			if r.Method == "OPTIONS" {
@@ -103,56 +211,70 @@ func (s *ExcelServer) serveSSE() error {
 
 	// Handle both the simple /sse endpoint and the langflow-compatible /api/v1/mcp/sse endpoint
 	sseHandler := func(w http.ResponseWriter, r *http.Request) {
+		// Log the request
+		log.Printf("SSE connection request from %s", r.RemoteAddr)
+
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no") // Disable buffering for nginx
 
-		// Create a channel for SSE events
-		ch := make(chan []byte)
-		done := make(chan bool)
-
-		// Send an immediate response to prevent timeouts during connection establishment
-		fmt.Fprintf(w, "data: {\"type\":\"connection_established\",\"message\":\"Connected to Excel MCP Server\"}\n\n")
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-
-		// Start the MCP server with the SSE channel
-		go func() {
-			// This is a simplified implementation. In a real implementation,
-			// we would need to adapt the MCP server to use the SSE channel for output
-			// and to read input from HTTP requests.
-			log.Println("SSE transport is enabled but the implementation is incomplete.")
-			log.Println("A full implementation would require modifications to the MCP library.")
-			
-			// Send heartbeat messages every 5 seconds to keep the connection alive
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ticker.C:
-					// Send a heartbeat message
-					ch <- []byte("{\"type\":\"heartbeat\",\"timestamp\":\"" + time.Now().Format(time.RFC3339) + "\"}")
-				case <-r.Context().Done():
-					close(ch)
-					done <- true
-					return
-				}
-			}
-		}()
-
-		// Send events to the client
+		// Check if the client supports flushing
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 			return
 		}
 
-		for data := range ch {
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+		// Create a new client
+		clientID := fmt.Sprintf("%d", time.Now().UnixNano())
+		client := &SSEClient{
+			ID:       clientID,
+			Messages: make(chan []byte, 100), // Buffer up to 100 messages
+		}
+
+		// Register the client
+		manager.register <- client
+
+		// Send an immediate connection message
+		connectionMsg := map[string]interface{}{
+			"type":    "connection",
+			"message": "Connected to Excel MCP Server",
+			"id":      clientID,
+		}
+		connectionJSON, _ := json.Marshal(connectionMsg)
+		fmt.Fprintf(w, "data: %s\n\n", connectionJSON)
+		flusher.Flush()
+
+		// Ensure client is unregistered when the connection is closed
+		defer func() {
+			manager.unregister <- client
+		}()
+
+		// Set up a done channel to notify if the client disconnects
+		done := make(chan bool)
+		
+		// Monitor for client disconnection
+		go func() {
+			<-r.Context().Done()
+			done <- true
+		}()
+
+		// Send events to the client
+		for {
+			select {
+			case message, ok := <-client.Messages:
+				if !ok {
+					// Channel was closed
+					return
+				}
+				fmt.Fprintf(w, "data: %s\n\n", message)
+				flusher.Flush()
+			case <-done:
+				// Client disconnected
+				return
+			}
 		}
 	}
 
@@ -162,16 +284,44 @@ func (s *ExcelServer) serveSSE() error {
 
 	// Add an endpoint to send commands to the MCP server
 	commandHandler := func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Content-Type", "application/json")
+		
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "{\"error\":\"Method not allowed\"}", http.StatusMethodNotAllowed)
 			return
 		}
 
 		// Read the command from the request body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("{\"error\":\"Failed to read request body: %s\"}", err), http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
+		// Log the received command
+		log.Printf("Received command: %s", string(body))
+
 		// In a real implementation, we would pass this to the MCP server
-		w.Header().Set("Content-Type", "application/json")
+		// For now, just acknowledge receipt
+		response := map[string]interface{}{
+			"status":  "received",
+			"message": "Command received successfully",
+		}
+		
+		responseJSON, _ := json.Marshal(response)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"received"}`)) 
+		w.Write(responseJSON)
+		
+		// Broadcast a notification about the command to all SSE clients
+		notification := map[string]interface{}{
+			"type":    "command",
+			"message": "Command received",
+			"time":    time.Now().Format(time.RFC3339),
+		}
+		notificationJSON, _ := json.Marshal(notification)
+		manager.broadcast <- notificationJSON
 	}
 
 	// Register the command handler for both endpoints with CORS middleware
@@ -180,9 +330,24 @@ func (s *ExcelServer) serveSSE() error {
 
 	// Add a simple status endpoint
 	statusHandler := func(w http.ResponseWriter, r *http.Request) {
+		// Handle HEAD requests for pre-connection checks
+		if r.Method == "HEAD" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		
+		status := map[string]interface{}{
+			"status":    "running",
+			"transport": "sse",
+			"clients":   len(manager.clients),
+			"uptime":    time.Since(time.Now()).String(),
+		}
+		
+		statusJSON, _ := json.Marshal(status)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"running","transport":"sse"}`)) 
+		w.Write(statusJSON)
 	}
 
 	// Register the status handler for both endpoints with CORS middleware
