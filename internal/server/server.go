@@ -15,6 +15,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/fbeawels/excel-mcp-server/internal/tools"
+	"github.com/xuri/excelize/v2"
 )
 
 type TransportType string
@@ -331,26 +332,338 @@ func (s *ExcelServer) serveSSE() error {
 		}
 		defer r.Body.Close()
 
-		// Log the received command
-		log.Printf("Received command: %s", string(body))
+		// Parse the JSON-RPC request
+		var jsonrpcRequest struct {
+			Jsonrpc string          `json:"jsonrpc"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params,omitempty"`
+			ID      interface{}     `json:"id,omitempty"`
+		}
 
-		// In a real implementation, we would pass this to the MCP server
-		// For now, just acknowledge receipt
+		if err := json.Unmarshal(body, &jsonrpcRequest); err != nil {
+			// Try parsing as a simple command if not JSON-RPC format
+			var simpleCommand struct {
+				Command string          `json:"command"`
+				Params  json.RawMessage `json:"params,omitempty"`
+			}
+			
+			if err := json.Unmarshal(body, &simpleCommand); err != nil {
+				http.Error(w, fmt.Sprintf("{\"error\":\"Failed to parse command: %s\"}", err), http.StatusBadRequest)
+				return
+			}
+			
+			// Convert simple command to JSON-RPC format
+			jsonrpcRequest.Jsonrpc = "2.0"
+			jsonrpcRequest.Method = simpleCommand.Command
+			jsonrpcRequest.Params = simpleCommand.Params
+			jsonrpcRequest.ID = 1 // Default ID
+		}
+
+		// Log the received command
+		log.Printf("Received JSON-RPC request: method=%s, params=%s, id=%v", 
+			jsonrpcRequest.Method, string(jsonrpcRequest.Params), jsonrpcRequest.ID)
+
+		// Process the command
+		var responseObj interface{}
+		var errorObj *map[string]interface{}
+
+		switch jsonrpcRequest.Method {
+		case "list_tools":
+			// Return the list of available tools
+			tools := []map[string]interface{}{
+				{
+					"name": "read_sheet_names",
+					"description": "Read the names of all sheets in an Excel file",
+					"inputSchema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"fileAbsolutePath": map[string]interface{}{
+								"type": "string",
+								"description": "Absolute path to the Excel file",
+							},
+						},
+						"required": []string{"fileAbsolutePath"},
+					},
+				},
+				{
+					"name": "read_sheet_data",
+					"description": "Read data from a specific sheet in an Excel file",
+					"inputSchema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"fileAbsolutePath": map[string]interface{}{
+								"type": "string",
+								"description": "Absolute path to the Excel file",
+							},
+							"sheetName": map[string]interface{}{
+								"type": "string",
+								"description": "Name of the sheet to read",
+							},
+						},
+						"required": []string{"fileAbsolutePath", "sheetName"},
+					},
+				},
+				{
+					"name": "write_sheet_data",
+					"description": "Write data to a specific sheet in an Excel file",
+					"inputSchema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"fileAbsolutePath": map[string]interface{}{
+								"type": "string",
+								"description": "Absolute path to the Excel file",
+							},
+							"sheetName": map[string]interface{}{
+								"type": "string",
+								"description": "Name of the sheet to write to",
+							},
+							"data": map[string]interface{}{
+								"type": "array",
+								"description": "Data to write to the sheet",
+							},
+						},
+						"required": []string{"fileAbsolutePath", "sheetName", "data"},
+					},
+				},
+			}
+			
+			responseObj = map[string]interface{}{
+				"tools": tools,
+			}
+
+		case "status":
+			// Return the server status
+			responseObj = map[string]interface{}{
+				"status":    "running",
+				"transport": "sse",
+				"clients":   len(manager.clients),
+				"uptime":    time.Since(time.Now()).String(),
+			}
+
+		case "call_tool":
+			// Parse the tool call request
+			var toolRequest struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			}
+			
+			if err := json.Unmarshal(jsonrpcRequest.Params, &toolRequest); err != nil {
+				errorObj = &map[string]interface{}{
+					"code":    -32602,
+					"message": "Invalid params",
+					"data":    err.Error(),
+				}
+			} else {
+				// Execute the tool
+				log.Printf("Executing tool: %s with arguments: %v", toolRequest.Name, toolRequest.Arguments)
+				
+				// Handle different tools directly
+				switch toolRequest.Name {
+				case "read_sheet_names":
+					// Get the file path
+					filePath, ok := toolRequest.Arguments["fileAbsolutePath"].(string)
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "fileAbsolutePath must be a string",
+						}
+						break
+					}
+					
+					// Open the Excel file
+					workbook, err := excelize.OpenFile(filePath)
+					if err != nil {
+						errorObj = &map[string]interface{}{
+							"code":    -32603,
+							"message": "Internal error",
+							"data":    err.Error(),
+						}
+						break
+					}
+					defer workbook.Close()
+					
+					// Get the sheet list
+					sheetList := workbook.GetSheetList()
+					responseObj = map[string]interface{}{
+						"sheets": sheetList,
+					}
+					
+				case "read_sheet_data":
+					// Get the file path and sheet name
+					filePath, ok := toolRequest.Arguments["fileAbsolutePath"].(string)
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "fileAbsolutePath must be a string",
+						}
+						break
+					}
+					
+					sheetName, ok := toolRequest.Arguments["sheetName"].(string)
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "sheetName must be a string",
+						}
+						break
+					}
+					
+					// Open the Excel file
+					workbook, err := excelize.OpenFile(filePath)
+					if err != nil {
+						errorObj = &map[string]interface{}{
+							"code":    -32603,
+							"message": "Internal error",
+							"data":    err.Error(),
+						}
+						break
+					}
+					defer workbook.Close()
+					
+					// Get all the rows in the sheet
+					rows, err := workbook.GetRows(sheetName)
+					if err != nil {
+						errorObj = &map[string]interface{}{
+							"code":    -32603,
+							"message": "Internal error",
+							"data":    err.Error(),
+						}
+						break
+					}
+					
+					responseObj = map[string]interface{}{
+						"data": rows,
+					}
+					
+				case "write_sheet_data":
+					// Get the file path, sheet name, and data
+					filePath, ok := toolRequest.Arguments["fileAbsolutePath"].(string)
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "fileAbsolutePath must be a string",
+						}
+						break
+					}
+					
+					sheetName, ok := toolRequest.Arguments["sheetName"].(string)
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "sheetName must be a string",
+						}
+						break
+					}
+					
+					data, ok := toolRequest.Arguments["data"].([]interface{})
+					if !ok {
+						errorObj = &map[string]interface{}{
+							"code":    -32602,
+							"message": "Invalid params",
+							"data":    "data must be an array",
+						}
+						break
+					}
+					
+					// Open or create the Excel file
+					var workbook *excelize.File
+					workbook, err = excelize.OpenFile(filePath)
+					if err != nil {
+						// Create a new file if it doesn't exist
+						workbook = excelize.NewFile()
+					}
+					defer workbook.Close()
+					
+					// Check if the sheet exists, create it if not
+					sheetIndex, _ := workbook.GetSheetIndex(sheetName)
+					if sheetIndex == -1 {
+						workbook.NewSheet(sheetName)
+					}
+					
+					// Write the data to the sheet
+					for rowIndex, rowData := range data {
+						rowArray, ok := rowData.([]interface{})
+						if !ok {
+							continue
+						}
+						
+						for colIndex, cellData := range rowArray {
+							cellValue := fmt.Sprintf("%v", cellData)
+							cell, err := excelize.CoordinatesToCellName(colIndex+1, rowIndex+1)
+							if err != nil {
+								continue
+							}
+							workbook.SetCellValue(sheetName, cell, cellValue)
+						}
+					}
+					
+					// Save the workbook
+					if err := workbook.SaveAs(filePath); err != nil {
+						errorObj = &map[string]interface{}{
+							"code":    -32603,
+							"message": "Internal error",
+							"data":    err.Error(),
+						}
+						break
+					}
+					
+					responseObj = map[string]interface{}{
+						"success": true,
+						"message": "Data written successfully",
+					}
+					
+				default:
+					errorObj = &map[string]interface{}{
+						"code":    -32601,
+						"message": "Method not found",
+						"data":    fmt.Sprintf("Unknown tool: %s", toolRequest.Name),
+					}
+				}
+			}
+
+		default:
+			// Unknown method
+			errorObj = &map[string]interface{}{
+				"code":    -32601,
+				"message": "Method not found",
+				"data":    fmt.Sprintf("Unknown method: %s", jsonrpcRequest.Method),
+			}
+		}
+
+		// Prepare the JSON-RPC response
 		response := map[string]interface{}{
-			"status":  "received",
-			"message": "Command received successfully",
+			"jsonrpc": "2.0",
+			"id":      jsonrpcRequest.ID,
 		}
 		
-		responseJSON, _ := json.Marshal(response)
+		if errorObj != nil {
+			response["error"] = *errorObj
+		} else {
+			response["result"] = responseObj
+		}
+
+		// Send the response
+		responseJSON, err := json.Marshal(response)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("{\"error\":\"Failed to marshal response: %s\"}", err), http.StatusInternalServerError)
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write(responseJSON)
 		
 		// Broadcast a notification about the command to all SSE clients in JSON-RPC format
 		notification := map[string]interface{}{
 			"jsonrpc": "2.0",
-			"method":  "command",
+			"method":  "notification",
 			"params": map[string]interface{}{
-				"message": "Command received",
+				"type":    "command_executed",
+				"command": jsonrpcRequest.Method,
 				"time":    time.Now().Format(time.RFC3339),
 			},
 		}
