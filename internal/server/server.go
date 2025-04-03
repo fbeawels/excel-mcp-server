@@ -13,9 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/fbeawels/excel-mcp-server/internal/tools"
 	"github.com/xuri/excelize/v2"
+	"github.com/gorilla/mux"
 )
 
 type TransportType string
@@ -228,10 +230,12 @@ func (s *ExcelServer) serveSSE() error {
 		// Log the request
 		log.Printf("SSE connection request from %s", r.RemoteAddr)
 
-		// Set headers for SSE
+		// Set headers for SSE according to MCP specification
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no") // Disable proxy buffering
+		w.Header().Set("Transfer-Encoding", "chunked")
 		
 		// Check if the client supports flushing
 		flusher, ok := w.(http.Flusher)
@@ -243,11 +247,21 @@ func (s *ExcelServer) serveSSE() error {
 		// Check if a session ID was provided in the query parameters
 		clientID := r.URL.Query().Get("session_id")
 		if clientID == "" {
-			// Generate a new session ID if none was provided
-			clientID = fmt.Sprintf("%d", time.Now().UnixNano())
-			log.Printf("No session ID provided, generated new ID: %s", clientID)
+			// Generate a new UUID-based session ID if none was provided
+			uuidObj, err := uuid.NewRandom()
+			if err != nil {
+				// Fall back to timestamp if UUID generation fails
+				clientID = fmt.Sprintf("%d", time.Now().UnixNano())
+				log.Printf("UUID generation failed, using timestamp: %s", clientID)
+			} else {
+				clientID = uuidObj.String()
+			}
+			log.Printf("No session ID provided, generated new UUID: %s", clientID)
+			
+			// Set session ID in response header for client to use in reconnections
+			w.Header().Set("X-Session-ID", clientID)
 		} else {
-			log.Printf("Using provided session ID: %s", clientID)
+			log.Printf("Client reconnecting with session ID: %s", clientID)
 		}
 
 		// Create a new client with the session ID
@@ -343,9 +357,75 @@ func (s *ExcelServer) serveSSE() error {
 		}
 	}
 
+	// Create a router to handle path parameters
+	router := mux.NewRouter()
+	
 	// Register the SSE handler for both endpoints with CORS middleware
-	http.HandleFunc("/sse", corsMiddleware(sseHandler))
-	http.HandleFunc("/api/v1/mcp/sse", corsMiddleware(sseHandler))
+	router.HandleFunc("/sse", corsMiddleware(sseHandler))
+	router.HandleFunc("/api/v1/mcp/sse", corsMiddleware(sseHandler))
+	
+	// Add a dedicated endpoint for session messages as required by MCP specification
+	messagesHandler := func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Content-Type", "application/json")
+		
+		if r.Method != http.MethodPost {
+			http.Error(w, "{\"error\":\"Method not allowed\"}", http.StatusMethodNotAllowed)
+			return
+		}
+		
+		// Get session ID from URL parameter
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "{\"error\":\"Missing session_id parameter\"}", http.StatusBadRequest)
+			return
+		}
+		
+		// Find the client with this session ID
+		manager.mutex.Lock()
+		client, exists := manager.clients[sessionID]
+		manager.mutex.Unlock()
+		
+		if !exists {
+			http.Error(w, "{\"error\":\"Invalid session ID\"}", http.StatusNotFound)
+			return
+		}
+		
+		// Read the message from the request body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("{\"error\":\"Failed to read request body: %s\"}", err), http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		
+		// Parse the JSON-RPC request
+		var jsonrpcRequest struct {
+			Jsonrpc string          `json:"jsonrpc"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params,omitempty"`
+			ID      interface{}     `json:"id,omitempty"`
+		}
+		
+		if err := json.Unmarshal(body, &jsonrpcRequest); err != nil {
+			http.Error(w, fmt.Sprintf("{\"error\":\"Failed to parse message: %s\"}", err), http.StatusBadRequest)
+			return
+		}
+		
+		// Log the received message
+		log.Printf("Received message for session %s: %s", sessionID, string(body))
+		
+		// Send the message to the client's channel
+		client.Messages <- body
+		
+		// Return success response
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "{\"success\":true}")
+	}
+	
+	// Register the messages handler for both endpoints
+	router.HandleFunc("/sse/messages", corsMiddleware(messagesHandler))
+	router.HandleFunc("/api/v1/mcp/sse/messages", corsMiddleware(messagesHandler))
 
 	// Add an endpoint to send commands to the MCP server
 	commandHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -413,8 +493,10 @@ func (s *ExcelServer) serveSSE() error {
 			// Log the raw params for debugging
 			log.Printf("Received initialize request with params: %s", string(jsonrpcRequest.Params))
 			
-			// Parse initialize parameters
+			// Parse initialize parameters with protocol version and capabilities
 			var initParams struct {
+				ProtocolVersion string `json:"protocolVersion"`
+				Capabilities    map[string]interface{} `json:"capabilities"`
 				ClientInfo struct {
 					Name    string `json:"name"`
 					Version string `json:"version"`
@@ -428,7 +510,15 @@ func (s *ExcelServer) serveSSE() error {
 					"message": "Invalid params for initialize: " + err.Error(),
 				}
 			} else {
+				// Log client information and protocol details
 				log.Printf("Initialized client: %s v%s", initParams.ClientInfo.Name, initParams.ClientInfo.Version)
+				log.Printf("Protocol version: %s", initParams.ProtocolVersion)
+				
+				// Log capabilities if provided
+				if initParams.Capabilities != nil && len(initParams.Capabilities) > 0 {
+					capabilitiesJSON, _ := json.Marshal(initParams.Capabilities)
+					log.Printf("Client capabilities: %s", string(capabilitiesJSON))
+				}
 				
 				// Return server info and tools
 				tools := []map[string]interface{}{
@@ -488,13 +578,19 @@ func (s *ExcelServer) serveSSE() error {
 					},
 				}
 				
-				// Prepare the response object
+				// Prepare the response object with protocol version and capabilities
 				responseObj = map[string]interface{}{
 					"serverInfo": map[string]interface{}{
 						"name": "excel-mcp-server",
 						"version": "1.0.0",
-						"capabilities": []string{"tools"},
+						"capabilities": map[string]interface{}{
+							"tools": true,
+							"streaming": true,
+							"sessions": true,
+							"reconnect": true,
+						},
 					},
+					"protocolVersion": "2024-04-03", // Current protocol version
 					"tools": tools,
 				}
 				
