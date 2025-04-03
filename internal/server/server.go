@@ -211,15 +211,24 @@ func (s *ExcelServer) serveSSE() error {
 
 	// Handle both the simple /sse endpoint and the langflow-compatible /api/v1/mcp/sse endpoint
 	sseHandler := func(w http.ResponseWriter, r *http.Request) {
+		// Special handling for HEAD requests which Langflow uses to check connectivity
+		if r.Method == "HEAD" {
+			log.Printf("HEAD request for SSE from %s", r.RemoteAddr)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// Log the request
 		log.Printf("SSE connection request from %s", r.RemoteAddr)
 
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache, no-transform")
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no") // Disable buffering for nginx
-
+		
 		// Check if the client supports flushing
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -238,13 +247,7 @@ func (s *ExcelServer) serveSSE() error {
 		manager.register <- client
 
 		// Send an immediate connection message
-		connectionMsg := map[string]interface{}{
-			"type":    "connection",
-			"message": "Connected to Excel MCP Server",
-			"id":      clientID,
-		}
-		connectionJSON, _ := json.Marshal(connectionMsg)
-		fmt.Fprintf(w, "data: %s\n\n", connectionJSON)
+		fmt.Fprintf(w, "data: {\"type\":\"connection\",\"message\":\"Connected to Excel MCP Server\",\"id\":\"%s\"}\n\n", clientID)
 		flusher.Flush()
 
 		// Ensure client is unregistered when the connection is closed
@@ -261,6 +264,10 @@ func (s *ExcelServer) serveSSE() error {
 			done <- true
 		}()
 
+		// Start a heartbeat ticker
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
 		// Send events to the client
 		for {
 			select {
@@ -270,6 +277,10 @@ func (s *ExcelServer) serveSSE() error {
 					return
 				}
 				fmt.Fprintf(w, "data: %s\n\n", message)
+				flusher.Flush()
+			case <-ticker.C:
+				// Send a heartbeat directly from this handler
+				fmt.Fprintf(w, "data: {\"type\":\"heartbeat\",\"timestamp\":\"%s\"}\n\n", time.Now().Format(time.RFC3339))
 				flusher.Flush()
 			case <-done:
 				// Client disconnected
@@ -333,6 +344,8 @@ func (s *ExcelServer) serveSSE() error {
 		// Handle HEAD requests for pre-connection checks
 		if r.Method == "HEAD" {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 			w.WriteHeader(http.StatusOK)
 			return
 		}
