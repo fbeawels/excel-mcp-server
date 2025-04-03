@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/fbeawels/excel-mcp-server/internal/tools"
@@ -80,31 +81,63 @@ func (s *ExcelServer) Start() error {
 
 // serveSSE starts an HTTP server that serves the MCP server over SSE
 func (s *ExcelServer) serveSSE() error {
+	// Add a middleware to handle CORS
+	corsMiddleware := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			// Set CORS headers for all responses
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "3600")
+
+			// Handle preflight requests
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			// Call the next handler
+			next(w, r)
+		}
+	}
+
 	// Handle both the simple /sse endpoint and the langflow-compatible /api/v1/mcp/sse endpoint
 	sseHandler := func(w http.ResponseWriter, r *http.Request) {
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		// Create a channel for SSE events
 		ch := make(chan []byte)
+		done := make(chan bool)
+
+		// Send an immediate response to prevent timeouts during connection establishment
+		fmt.Fprintf(w, "data: {\"type\":\"connection_established\",\"message\":\"Connected to Excel MCP Server\"}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
 
 		// Start the MCP server with the SSE channel
 		go func() {
 			// This is a simplified implementation. In a real implementation,
 			// we would need to adapt the MCP server to use the SSE channel for output
 			// and to read input from HTTP requests.
-			// For now, we'll just log that SSE is not fully implemented
 			log.Println("SSE transport is enabled but the implementation is incomplete.")
 			log.Println("A full implementation would require modifications to the MCP library.")
 			
-			// Keep the connection alive
+			// Send heartbeat messages every 5 seconds to keep the connection alive
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
 			for {
 				select {
+				case <-ticker.C:
+					// Send a heartbeat message
+					ch <- []byte("{\"type\":\"heartbeat\",\"timestamp\":\"" + time.Now().Format(time.RFC3339) + "\"}")
 				case <-r.Context().Done():
 					close(ch)
+					done <- true
 					return
 				}
 			}
@@ -123,9 +156,9 @@ func (s *ExcelServer) serveSSE() error {
 		}
 	}
 
-	// Register the SSE handler for both endpoints
-	http.HandleFunc("/sse", sseHandler)
-	http.HandleFunc("/api/v1/mcp/sse", sseHandler)
+	// Register the SSE handler for both endpoints with CORS middleware
+	http.HandleFunc("/sse", corsMiddleware(sseHandler))
+	http.HandleFunc("/api/v1/mcp/sse", corsMiddleware(sseHandler))
 
 	// Add an endpoint to send commands to the MCP server
 	commandHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -141,9 +174,9 @@ func (s *ExcelServer) serveSSE() error {
 		w.Write([]byte(`{"status":"received"}`)) 
 	}
 
-	// Register the command handler for both endpoints
-	http.HandleFunc("/command", commandHandler)
-	http.HandleFunc("/api/v1/mcp/command", commandHandler)
+	// Register the command handler for both endpoints with CORS middleware
+	http.HandleFunc("/command", corsMiddleware(commandHandler))
+	http.HandleFunc("/api/v1/mcp/command", corsMiddleware(commandHandler))
 
 	// Add a simple status endpoint
 	statusHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -152,9 +185,9 @@ func (s *ExcelServer) serveSSE() error {
 		w.Write([]byte(`{"status":"running","transport":"sse"}`)) 
 	}
 
-	// Register the status handler for both endpoints
-	http.HandleFunc("/status", statusHandler)
-	http.HandleFunc("/api/v1/mcp/status", statusHandler)
+	// Register the status handler for both endpoints with CORS middleware
+	http.HandleFunc("/status", corsMiddleware(statusHandler))
+	http.HandleFunc("/api/v1/mcp/status", corsMiddleware(statusHandler))
 
 	// Start the HTTP server
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
