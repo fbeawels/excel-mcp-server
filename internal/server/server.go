@@ -275,27 +275,17 @@ func (s *ExcelServer) serveSSE() error {
 
 		// First, send the endpoint event as expected by the MCP SSE client
 		// This tells the client where to send POST messages
-		// The MCP client expects the exact URL where it should send POST requests
-		// We need to use the same host and scheme as the original request
+		// The MCP client expects the path portion of the URL (not the full URL)
+		// The client will join this path with the original connection URL
+		// The client also verifies that the scheme and host match the original URL
 		
-		// Get the scheme and host from the request
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
+		// For MCP SSE client, we need to send just the path portion
+		// The client will join this with the original URL
+		endpointPath := fmt.Sprintf("/api/v1/mcp/messages?session_id=%s", clientID)
+		log.Printf("Sending endpoint path to client %s: %s", clientID, endpointPath)
 		
-		// Use the host from the request or default to localhost:PORT
-		host := r.Host
-		if host == "" {
-			host = fmt.Sprintf("localhost:%d", s.port)
-		}
-		
-		// Create an absolute URL for the endpoint
-		endpointURL := fmt.Sprintf("%s://%s/sse/messages?session_id=%s", scheme, host, clientID)
-		log.Printf("Sending absolute endpoint URL to client %s: %s", clientID, endpointURL)
-		
-		// Send the endpoint event with the absolute URL
-		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
+		// Send the endpoint event with just the path
+		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointPath)
 		flusher.Flush()
 		
 		// Then send an immediate connection message in JSON-RPC format
@@ -450,9 +440,10 @@ func (s *ExcelServer) serveSSE() error {
 		fmt.Fprintf(w, "{\"success\":true}")
 	}
 	
-	// Register the messages handler for both endpoints
+	// Register the messages handler for all endpoints
 	router.HandleFunc("/sse/messages", corsMiddleware(messagesHandler))
 	router.HandleFunc("/api/v1/mcp/sse/messages", corsMiddleware(messagesHandler))
+	router.HandleFunc("/api/v1/mcp/messages", corsMiddleware(messagesHandler))
 
 	// Add an endpoint to send commands to the MCP server
 	commandHandler := func(w http.ResponseWriter, r *http.Request) {
