@@ -240,8 +240,17 @@ func (s *ExcelServer) serveSSE() error {
 			return
 		}
 
-		// Create a new client
-		clientID := fmt.Sprintf("%d", time.Now().UnixNano())
+		// Check if a session ID was provided in the query parameters
+		clientID := r.URL.Query().Get("session_id")
+		if clientID == "" {
+			// Generate a new session ID if none was provided
+			clientID = fmt.Sprintf("%d", time.Now().UnixNano())
+			log.Printf("No session ID provided, generated new ID: %s", clientID)
+		} else {
+			log.Printf("Using provided session ID: %s", clientID)
+		}
+
+		// Create a new client with the session ID
 		client := &SSEClient{
 			ID:       clientID,
 			Messages: make(chan []byte, 100), // Buffer up to 100 messages
@@ -263,80 +272,8 @@ func (s *ExcelServer) serveSSE() error {
 		fmt.Fprintf(w, "data: %s\n\n", jsonrpcData)
 		flusher.Flush()
 		
-		// Also send the tools list immediately after connection
-		log.Printf("Sending initial tools list to client %s", clientID)
-		
-		// Create the tools list
-		tools := []map[string]interface{}{
-			{
-				"name": "read_sheet_names",
-				"description": "Read the names of all sheets in an Excel file",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"fileAbsolutePath": map[string]interface{}{
-							"type": "string",
-							"description": "Absolute path to the Excel file",
-						},
-					},
-					"required": []string{"fileAbsolutePath"},
-				},
-			},
-			{
-				"name": "read_sheet_data",
-				"description": "Read data from a specific sheet in an Excel file",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"fileAbsolutePath": map[string]interface{}{
-							"type": "string",
-							"description": "Absolute path to the Excel file",
-						},
-						"sheetName": map[string]interface{}{
-							"type": "string",
-							"description": "Name of the sheet to read",
-						},
-					},
-					"required": []string{"fileAbsolutePath", "sheetName"},
-				},
-			},
-			{
-				"name": "write_sheet_data",
-				"description": "Write data to a specific sheet in an Excel file",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"fileAbsolutePath": map[string]interface{}{
-							"type": "string",
-							"description": "Absolute path to the Excel file",
-						},
-						"sheetName": map[string]interface{}{
-							"type": "string",
-							"description": "Name of the sheet to write to",
-						},
-						"data": map[string]interface{}{
-							"type": "array",
-							"description": "Data to write to the sheet",
-						},
-					},
-					"required": []string{"fileAbsolutePath", "sheetName", "data"},
-				},
-			},
-		}
-		
-		// Create the JSON-RPC response for list_tools
-		toolsResponse := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id": 1, // Use a default ID
-			"result": map[string]interface{}{
-				"tools": tools,
-			},
-		}
-		
-		// Send the tools list
-		toolsJSON, _ := json.Marshal(toolsResponse)
-		fmt.Fprintf(w, "data: %s\n\n", toolsJSON)
-		flusher.Flush()
+		// Log connection success but don't send tools list automatically
+		log.Printf("Client %s connected successfully. Tools will be sent upon initialize request.", clientID)
 
 		// Ensure client is unregistered when the connection is closed
 		defer func() {
@@ -443,6 +380,99 @@ func (s *ExcelServer) serveSSE() error {
 		var errorObj *map[string]interface{}
 
 		switch jsonrpcRequest.Method {
+		case "ping":
+			// Implement handle_ping as required by MCP specification
+			responseObj = map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+			}
+			log.Printf("Handled ping request with ID: %v", jsonrpcRequest.ID)
+
+		case "initialize":
+			// Implement handle_initialize as required by MCP specification
+			// Parse initialize parameters
+			var initParams struct {
+				ClientInfo struct {
+					Name    string `json:"name"`
+					Version string `json:"version"`
+				} `json:"clientInfo"`
+			}
+			
+			if err := json.Unmarshal(jsonrpcRequest.Params, &initParams); err != nil {
+				errorObj = &map[string]interface{}{
+					"code": -32602,
+					"message": "Invalid params for initialize",
+				}
+			} else {
+				log.Printf("Initialized client: %s v%s", initParams.ClientInfo.Name, initParams.ClientInfo.Version)
+				
+				// Return server info and tools
+				tools := []map[string]interface{}{
+					{
+						"name": "read_sheet_names",
+						"description": "Read the names of all sheets in an Excel file",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"fileAbsolutePath": map[string]interface{}{
+									"type": "string",
+									"description": "Absolute path to the Excel file",
+								},
+							},
+							"required": []string{"fileAbsolutePath"},
+						},
+					},
+					{
+						"name": "read_sheet_data",
+						"description": "Read data from a specific sheet in an Excel file",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"fileAbsolutePath": map[string]interface{}{
+									"type": "string",
+									"description": "Absolute path to the Excel file",
+								},
+								"sheetName": map[string]interface{}{
+									"type": "string",
+									"description": "Name of the sheet to read",
+								},
+							},
+							"required": []string{"fileAbsolutePath", "sheetName"},
+						},
+					},
+					{
+						"name": "write_sheet_data",
+						"description": "Write data to a specific sheet in an Excel file",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"fileAbsolutePath": map[string]interface{}{
+									"type": "string",
+									"description": "Absolute path to the Excel file",
+								},
+								"sheetName": map[string]interface{}{
+									"type": "string",
+									"description": "Name of the sheet to write to",
+								},
+								"data": map[string]interface{}{
+									"type": "array",
+									"description": "Data to write to the sheet",
+								},
+							},
+							"required": []string{"fileAbsolutePath", "sheetName", "data"},
+						},
+					},
+				}
+				
+				responseObj = map[string]interface{}{
+					"serverInfo": map[string]interface{}{
+						"name": "excel-mcp-server",
+						"version": "1.0.0",
+						"capabilities": []string{"tools"},
+					},
+					"tools": tools,
+				}
+			}
+
 		case "list_tools":
 			// Return the list of available tools
 			tools := []map[string]interface{}{
@@ -560,8 +590,16 @@ func (s *ExcelServer) serveSSE() error {
 					
 					// Get the sheet list
 					sheetList := workbook.GetSheetList()
+					
+					// Format response according to MCP specification
+					sheetListJSON, _ := json.Marshal(sheetList)
 					responseObj = map[string]interface{}{
-						"sheets": sheetList,
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": string(sheetListJSON),
+							},
+						},
 					}
 					
 				case "read_sheet_data":
@@ -609,8 +647,15 @@ func (s *ExcelServer) serveSSE() error {
 						break
 					}
 					
+					// Format response according to MCP specification
+					rowsJSON, _ := json.Marshal(rows)
 					responseObj = map[string]interface{}{
-						"data": rows,
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": string(rowsJSON),
+							},
+						},
 					}
 					
 				case "write_sheet_data":
@@ -687,9 +732,14 @@ func (s *ExcelServer) serveSSE() error {
 						break
 					}
 					
+					// Format response according to MCP specification
 					responseObj = map[string]interface{}{
-						"success": true,
-						"message": "Data written successfully",
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": "Data written successfully",
+							},
+						},
 					}
 					
 				default:
