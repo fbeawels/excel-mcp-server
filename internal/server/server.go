@@ -80,7 +80,8 @@ func (s *ExcelServer) Start() error {
 
 // serveSSE starts an HTTP server that serves the MCP server over SSE
 func (s *ExcelServer) serveSSE() error {
-	http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+	// Handle both the simple /sse endpoint and the langflow-compatible /api/v1/mcp/sse endpoint
+	sseHandler := func(w http.ResponseWriter, r *http.Request) {
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -120,10 +121,14 @@ func (s *ExcelServer) serveSSE() error {
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
-	})
+	}
+
+	// Register the SSE handler for both endpoints
+	http.HandleFunc("/sse", sseHandler)
+	http.HandleFunc("/api/v1/mcp/sse", sseHandler)
 
 	// Add an endpoint to send commands to the MCP server
-	http.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
+	commandHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -134,14 +139,22 @@ func (s *ExcelServer) serveSSE() error {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"received"}`)) 
-	})
+	}
+
+	// Register the command handler for both endpoints
+	http.HandleFunc("/command", commandHandler)
+	http.HandleFunc("/api/v1/mcp/command", commandHandler)
 
 	// Add a simple status endpoint
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	statusHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"running","transport":"sse"}`)) 
-	})
+	}
+
+	// Register the status handler for both endpoints
+	http.HandleFunc("/status", statusHandler)
+	http.HandleFunc("/api/v1/mcp/status", statusHandler)
 
 	// Start the HTTP server
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
@@ -157,6 +170,7 @@ func (s *ExcelServer) serveSSE() error {
 	}
 	
 	log.Printf("SSE endpoint available at http://%s:%d/sse", displayHost, s.port)
+	log.Printf("Langflow-compatible SSE endpoint available at http://%s:%d/api/v1/mcp/sse", displayHost, s.port)
 	log.Printf("Command endpoint available at http://%s:%d/command", displayHost, s.port)
 	log.Printf("Status endpoint available at http://%s:%d/status", displayHost, s.port)
 	return http.ListenAndServe(address, nil)
