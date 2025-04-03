@@ -275,8 +275,26 @@ func (s *ExcelServer) serveSSE() error {
 
 		// First, send the endpoint event as expected by the MCP SSE client
 		// This tells the client where to send POST messages
-		endpointURL := fmt.Sprintf("/sse/messages?session_id=%s", clientID)
-		log.Printf("Sending endpoint URL to client %s: %s", clientID, endpointURL)
+		// The MCP client expects the exact URL where it should send POST requests
+		// We need to use the same host and scheme as the original request
+		
+		// Get the scheme and host from the request
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		
+		// Use the host from the request or default to localhost:PORT
+		host := r.Host
+		if host == "" {
+			host = fmt.Sprintf("localhost:%d", s.port)
+		}
+		
+		// Create an absolute URL for the endpoint
+		endpointURL := fmt.Sprintf("%s://%s/sse/messages?session_id=%s", scheme, host, clientID)
+		log.Printf("Sending absolute endpoint URL to client %s: %s", clientID, endpointURL)
+		
+		// Send the endpoint event with the absolute URL
 		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
 		flusher.Flush()
 		
