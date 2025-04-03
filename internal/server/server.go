@@ -273,7 +273,14 @@ func (s *ExcelServer) serveSSE() error {
 		// Register the client
 		manager.register <- client
 
-		// Send an immediate connection message in JSON-RPC format
+		// First, send the endpoint event as expected by the MCP SSE client
+		// This tells the client where to send POST messages
+		endpointURL := fmt.Sprintf("/sse/messages?session_id=%s", clientID)
+		log.Printf("Sending endpoint URL to client %s: %s", clientID, endpointURL)
+		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
+		flusher.Flush()
+		
+		// Then send an immediate connection message in JSON-RPC format
 		jsonrpcMsg := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"method": "connection",
@@ -287,8 +294,8 @@ func (s *ExcelServer) serveSSE() error {
 		// Log the exact message being sent
 		log.Printf("Sending connection message to client %s: %s", clientID, string(jsonrpcData))
 		
-		// Ensure proper SSE format with data: prefix and double newline suffix
-		fmt.Fprintf(w, "data: %s\n\n", jsonrpcData)
+		// Ensure proper SSE format with event: message and data: prefix
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", jsonrpcData)
 		flusher.Flush()
 		
 		// Send an immediate heartbeat to ensure the connection is working
@@ -336,7 +343,8 @@ func (s *ExcelServer) serveSSE() error {
 					// Channel was closed
 					return
 				}
-				fmt.Fprintf(w, "data: %s\n\n", message)
+				// Use event: message format for all JSON-RPC messages
+				fmt.Fprintf(w, "event: message\ndata: %s\n\n", message)
 				flusher.Flush()
 			case <-ticker.C:
 				// Send a heartbeat directly from this handler in JSON-RPC format
@@ -348,7 +356,8 @@ func (s *ExcelServer) serveSSE() error {
 					},
 				}
 				heartbeatData, _ := json.Marshal(heartbeatMsg)
-				fmt.Fprintf(w, "data: %s\n\n", heartbeatData)
+				// Use event: message format for all JSON-RPC messages
+				fmt.Fprintf(w, "event: message\ndata: %s\n\n", heartbeatData)
 				flusher.Flush()
 			case <-done:
 				// Client disconnected
