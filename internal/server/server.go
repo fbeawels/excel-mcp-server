@@ -932,8 +932,8 @@ func (s *ExcelServer) serveSSE() error {
 	}
 
 	// Register the command handler for both endpoints with CORS middleware
-	http.HandleFunc("/command", corsMiddleware(commandHandler))
-	http.HandleFunc("/api/v1/mcp/command", corsMiddleware(commandHandler))
+	router.HandleFunc("/command", corsMiddleware(commandHandler))
+	router.HandleFunc("/api/v1/mcp/command", corsMiddleware(commandHandler))
 
 	// Add a simple status endpoint
 	statusHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -960,12 +960,15 @@ func (s *ExcelServer) serveSSE() error {
 	}
 
 	// Register the status handler for both endpoints with CORS middleware
-	http.HandleFunc("/status", corsMiddleware(statusHandler))
-	http.HandleFunc("/api/v1/mcp/status", corsMiddleware(statusHandler))
+	router.HandleFunc("/status", corsMiddleware(statusHandler))
+	router.HandleFunc("/api/v1/mcp/status", corsMiddleware(statusHandler))
 
-	// Start the HTTP server
+	// Start the HTTP server with the Gorilla Mux router
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
 	log.Printf("Starting Excel MCP Server with SSE transport on %s", address)
+	
+	// Use the router as the main HTTP handler
+	http.Handle("/", router)
 	
 	// Determine the host to display in URLs
 	displayHost := "localhost"
