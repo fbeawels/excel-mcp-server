@@ -262,6 +262,81 @@ func (s *ExcelServer) serveSSE() error {
 		jsonrpcData, _ := json.Marshal(jsonrpcMsg)
 		fmt.Fprintf(w, "data: %s\n\n", jsonrpcData)
 		flusher.Flush()
+		
+		// Also send the tools list immediately after connection
+		log.Printf("Sending initial tools list to client %s", clientID)
+		
+		// Create the tools list
+		tools := []map[string]interface{}{
+			{
+				"name": "read_sheet_names",
+				"description": "Read the names of all sheets in an Excel file",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"fileAbsolutePath": map[string]interface{}{
+							"type": "string",
+							"description": "Absolute path to the Excel file",
+						},
+					},
+					"required": []string{"fileAbsolutePath"},
+				},
+			},
+			{
+				"name": "read_sheet_data",
+				"description": "Read data from a specific sheet in an Excel file",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"fileAbsolutePath": map[string]interface{}{
+							"type": "string",
+							"description": "Absolute path to the Excel file",
+						},
+						"sheetName": map[string]interface{}{
+							"type": "string",
+							"description": "Name of the sheet to read",
+						},
+					},
+					"required": []string{"fileAbsolutePath", "sheetName"},
+				},
+			},
+			{
+				"name": "write_sheet_data",
+				"description": "Write data to a specific sheet in an Excel file",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"fileAbsolutePath": map[string]interface{}{
+							"type": "string",
+							"description": "Absolute path to the Excel file",
+						},
+						"sheetName": map[string]interface{}{
+							"type": "string",
+							"description": "Name of the sheet to write to",
+						},
+						"data": map[string]interface{}{
+							"type": "array",
+							"description": "Data to write to the sheet",
+						},
+					},
+					"required": []string{"fileAbsolutePath", "sheetName", "data"},
+				},
+			},
+		}
+		
+		// Create the JSON-RPC response for list_tools
+		toolsResponse := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id": 1, // Use a default ID
+			"result": map[string]interface{}{
+				"tools": tools,
+			},
+		}
+		
+		// Send the tools list
+		toolsJSON, _ := json.Marshal(toolsResponse)
+		fmt.Fprintf(w, "data: %s\n\n", toolsJSON)
+		flusher.Flush()
 
 		// Ensure client is unregistered when the connection is closed
 		defer func() {
